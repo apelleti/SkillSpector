@@ -24,7 +24,7 @@ SkillSpector is part of the [NVIDIA Verified Skills pipeline](https://docs.nvidi
 ## Features
 
 - **Multi-format input**: Scan Git repos, URLs, zip files, directories, or single files
-- **71 vulnerability patterns** across 17 categories: prompt injection, data exfiltration, privilege escalation, supply chain, excessive agency, output handling, system prompt leakage, memory poisoning, tool misuse, rogue agent, anti-refusal, trigger abuse, dangerous code (AST), taint tracking, YARA signatures, MCP least privilege, and MCP tool poisoning
+- **75 vulnerability patterns** across 18 categories: prompt injection, data exfiltration, privilege escalation, supply chain, excessive agency, output handling, system prompt leakage, memory poisoning, tool misuse, rogue agent, anti-refusal, trigger abuse, dangerous code (AST), taint tracking, YARA signatures, MCP least privilege, MCP tool poisoning, and bundled Kilo configuration
 - **Two-stage analysis**: Fast static analysis + optional LLM semantic evaluation
 - **Live vulnerability lookups**: SC4 queries [OSV.dev](https://osv.dev) for real-time CVE data with automatic offline fallback
 - **Multiple output formats**: Terminal, JSON, Markdown, and SARIF reports
@@ -379,7 +379,7 @@ claude mcp add skillspector -- skillspector mcp
 
 ## Vulnerability Patterns
 
-SkillSpector detects **71 vulnerability patterns** across 17 categories:
+SkillSpector detects **75 vulnerability patterns** across 18 categories:
 
 ### Prompt Injection (6 patterns)
 
@@ -538,6 +538,19 @@ SkillSpector detects **71 vulnerability patterns** across 17 categories:
 | TP2 | Unicode Deception | HIGH | Homoglyphs, RTL overrides, mixed-script identifiers in tool metadata |
 | TP3 | Parameter Description Injection | MEDIUM | Injection patterns in parameter definitions (overrides, system tokens, malicious defaults) |
 | TP4 | Description-Behavior Mismatch | MEDIUM | Declared tool description does not match actual code behavior (LLM-powered) |
+
+### Bundled Kilo Configuration (4 patterns)
+
+Applies to `kilo.json(c)`, `.kilo/kilo.json(c)`, `.kilocode/kilo.json(c)`, the legacy `opencode.json(c)` project file (JSONC comments and trailing commas are accepted), and plugin modules under `.kilo/plugin(s)/` or `.kilocode/plugin(s)/`. These files take effect once the bundle becomes, or is copied into, a [Kilo](https://kilo.ai) project.
+
+| ID | Pattern | Severity | Description |
+|----|---------|----------|-------------|
+| KC1 | Permission Pre-Approval | MEDIUM–CRITICAL | `permission` set to `allow` globally (CRITICAL, blocking), for `bash`/`edit`/`external_directory` (HIGH), or through broad wildcard patterns, including inside `agent`/`mode` entries |
+| KC2 | Bundled MCP Servers | MEDIUM/HIGH | `local` servers start a command with the project (HIGH); `remote` servers receive tool traffic (MEDIUM) |
+| KC3 | Bundled Plugins | HIGH | `plugin` entries or bundled plugin modules loaded as code into Kilo |
+| KC4 | External Skill/Instruction Sources | MEDIUM/HIGH | `skills.urls` (HIGH), or `skills.paths`/`instructions` that point outside the bundle (MEDIUM) |
+
+The agent snooping rules (AS1–AS3) also cover Kilo's `.kilo/`, `.kilocode/` and `~/.config/kilo/` directories, `mcp_settings.json`, and the shared `.agents/skills/` directory.
 
 All detected patterns are listed in the tables above.
 

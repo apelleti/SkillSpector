@@ -482,6 +482,8 @@ def _risk_score_floor(finding: Finding) -> int:
         return 51
     if finding.rule_id == "BH3":
         return 51
+    if finding.rule_id == "KC1":
+        return 51
     return 0
 
 
