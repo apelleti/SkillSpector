@@ -1,34 +1,45 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Analyze bundled Kilo configuration and plugin surfaces.
+"""Analyze bundled Kilo configuration, agent, plugin, and script surfaces.
 
-Kilo (Kilo Code / Kilo CLI) loads project configuration from ``kilo.json``,
-``kilo.jsonc``, ``.kilo/kilo.json(c)``, the legacy ``.kilocode/`` directory and
-the legacy ``opencode.json(c)`` project files. It also auto-loads plugin
-modules from ``.kilo/plugin(s)/``. A skill bundle that ships these files can,
-once its directory becomes (or is copied into) a Kilo project, pre-approve
-tools, start MCP server processes, load plugin code, or pull further skills
-and instructions from outside the reviewed bundle.
+Kilo (Kilo Code / Kilo CLI) loads project configuration from ``kilo.json(c)``
+and the legacy ``opencode.json(c)``, at the project root and inside its
+``.kilo/`` and legacy ``.kilocode/`` directories. From those directories it
+also loads agent and mode definitions (whose frontmatter may carry
+permissions) and imports plugin modules on startup; the Kilo Agent Manager
+runs ``.kilo/setup-script`` when it creates a worktree. A skill bundle that
+ships these files can, once its directory becomes (or is copied into) a Kilo
+project, pre-approve tools, start MCP server processes, run code, or pull
+further skills and instructions from outside the reviewed bundle.
+
+Behavior was verified against Kilo CLI 7.8.1 (``kilo debug config``,
+``kilo debug agent``, ``kilo debug skill``).
 
 Rules:
 
-- KC1: permission grants (``permission`` set to ``allow`` globally, per tool,
-  or through a wildcard pattern; also inside ``agent``/``mode`` entries).
+- KC1: permission grants that lift a prompt of Kilo's built-in rules
+  (globally, per tool, or through a wildcard pattern; also inside
+  ``agent``/``mode`` entries and agent/mode frontmatter).
 - KC2: MCP servers (``local`` servers run a command; ``remote`` servers
   receive tool traffic).
-- KC3: plugins (``plugin`` entries and bundled plugin modules).
+- KC3: code execution (``plugin`` entries, plugin modules, and Agent Manager
+  setup/run scripts).
 - KC4: skill and instruction sources outside the bundle (``skills.urls``,
   ``skills.paths`` and ``instructions`` pointing outside the bundle).
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
+
+import yaml
 
 from skillspector.inspection_ledger import (
     InspectionLedgerEvent,
@@ -54,26 +65,41 @@ _CONFIG_PATHS: Final = frozenset(
         ".kilo/kilo.jsonc",
         ".kilocode/kilo.json",
         ".kilocode/kilo.jsonc",
-        # Kilo still reads the OpenCode project file it was forked from.
+        # Kilo still reads the OpenCode files it was forked from, both at the
+        # project root and inside its config directories.
         "opencode.json",
         "opencode.jsonc",
+        ".kilo/opencode.json",
+        ".kilo/opencode.jsonc",
+        ".kilocode/opencode.json",
+        ".kilocode/opencode.jsonc",
     }
 )
-_PLUGIN_PATH: Final = re.compile(r"\A\.kilo(?:code)?/plugins?/[^/]+\.(?:ts|js|mjs|cjs)\Z")
+# Kilo imports these modules as soon as it starts in the project.
+_PLUGIN_PATH: Final = re.compile(r"\A\.kilo(?:code)?/plugins?/[^/]+\.(?:ts|js)\Z")
+# Agent and mode definitions whose frontmatter may carry a ``permission`` map.
+_AGENT_FILE_PATH: Final = re.compile(r"\A\.kilo(?:code)?/(?:agents?/.+|modes?/[^/]+)\.md\Z")
+# Agent Manager (Kilo VS Code extension) runs the setup script automatically
+# when it creates a worktree, and the run script from the Run button.
+_AGENT_MANAGER_SCRIPT_PATH: Final = re.compile(
+    r"\A\.kilo/(?P<kind>setup|run)-script(?:\.(?:sh|ps1|cmd|bat))?\Z"
+)
+_MAX_FRONTMATTER_CHARS: Final = 256 * 1024
 
 _MAX_DECLARATIONS: Final = 2_048
 _MAX_EVIDENCE_ITEMS: Final = 32
 _MAX_EVIDENCE_CHARS: Final = 200
 
-# Tools whose blanket approval lets the agent run commands, change files, or
-# leave the project without a prompt.
-_HIGH_RISK_TOOLS: Final = frozenset(
-    {"bash", "edit", "write", "patch", "multiedit", "external_directory"}
-)
-# Tools whose approval is harmless on its own; they are not reported.
-_LOW_RISK_TOOLS: Final = frozenset(
-    {"read", "glob", "grep", "list", "lsp", "todoread", "todowrite", "question"}
-)
+# Kilo appends project rules after its built-in ones and the last matching
+# rule wins. The built-in ``code`` agent (Kilo CLI 7.8.1) already allows every
+# tool except these, so an ``allow`` elsewhere removes no prompt and is not
+# reported. ``read`` only prompts for ``.env`` files.
+_PROMPTED_TOOL_SEVERITY: Final = {
+    "bash": Severity.HIGH,
+    "external_directory": Severity.HIGH,
+    "read": Severity.HIGH,
+    "doom_loop": Severity.MEDIUM,
+}
 _WILDCARD_PATTERNS: Final = frozenset({"*", "**"})
 _SEVERITY_RANK: Final = {
     Severity.LOW: 0,
@@ -197,24 +223,50 @@ def _bounded(value: str) -> str:
 
 
 def _tool_severity(tool: str) -> Severity | None:
+    """Severity of approving ``tool``, which may itself be a glob over tool names."""
     if tool == "*":
         return Severity.CRITICAL
-    if tool in _HIGH_RISK_TOOLS:
-        return Severity.HIGH
-    if tool in _LOW_RISK_TOOLS:
+    matched = [
+        severity
+        for name, severity in _PROMPTED_TOOL_SEVERITY.items()
+        if fnmatch.fnmatchcase(name, tool)
+    ]
+    if not matched:
         return None
-    # webfetch, websearch, task, skill, MCP tool names, and future tools.
-    return Severity.MEDIUM
+    return max(matched, key=_SEVERITY_RANK.__getitem__)
+
+
+def _pattern_declaration(tool: str, subject: str, pattern: str) -> _Declaration | None:
+    """Classify one ``allow`` pattern of a prompted tool."""
+    severity = _tool_severity(tool)
+    if severity is None:
+        return None
+    if pattern in _WILDCARD_PATTERNS:
+        return _Declaration("KC1", severity, "tool_allow", subject)
+    if tool == "read":
+        # Only the built-in ``.env`` prompt can be lifted for ``read``.
+        if ".env" in pattern or fnmatch.fnmatchcase(".env", pattern):
+            return _Declaration(
+                "KC1", severity, "secret_read_allow", f"{subject}:{_bounded(pattern)}"
+            )
+        return None
+    if "*" in pattern:
+        return _Declaration(
+            "KC1", Severity.MEDIUM, "pattern_allow", f"{subject}:{_bounded(pattern)}"
+        )
+    return None
 
 
 def _permission_declarations(permission: object, scope: str) -> list[_Declaration]:
     """Return KC1 declarations for one ``permission`` value."""
     if permission == "allow":
-        return [_Declaration("KC1", Severity.CRITICAL, "global_allow", scope)]
+        return [_Declaration("KC1", Severity.CRITICAL, "global_allow", scope or "*")]
     if not isinstance(permission, dict):
         return []
     declarations: list[_Declaration] = []
     for tool, value in permission.items():
+        if not isinstance(tool, str):
+            continue
         severity = _tool_severity(tool)
         if severity is None:
             continue
@@ -223,19 +275,10 @@ def _permission_declarations(permission: object, scope: str) -> list[_Declaratio
             declarations.append(_Declaration("KC1", severity, "tool_allow", subject))
         elif isinstance(value, dict):
             for pattern, action in value.items():
-                if action != "allow":
-                    continue
-                if pattern in _WILDCARD_PATTERNS:
-                    declarations.append(_Declaration("KC1", severity, "tool_allow", subject))
-                elif "*" in pattern and severity in (Severity.HIGH, Severity.CRITICAL):
-                    declarations.append(
-                        _Declaration(
-                            "KC1",
-                            Severity.MEDIUM,
-                            "pattern_allow",
-                            f"{subject}:{_bounded(pattern)}",
-                        )
-                    )
+                if action == "allow" and isinstance(pattern, str):
+                    declaration = _pattern_declaration(tool, subject, pattern)
+                    if declaration is not None:
+                        declarations.append(declaration)
     return declarations
 
 
@@ -325,8 +368,10 @@ def _source_declarations(document: dict[str, object]) -> list[_Declaration]:
             )
         paths = skills.get("paths")
         if isinstance(paths, list):
+            # Kilo CLI 7.8.1 ignores project-level paths outside the project
+            # (it honors them only from the global config), hence LOW.
             declarations.extend(
-                _Declaration("KC4", Severity.MEDIUM, "external_skill_path", _bounded(path))
+                _Declaration("KC4", Severity.LOW, "external_skill_path", _bounded(path))
                 for path in paths
                 if isinstance(path, str) and _is_outside_bundle(path)
             )
@@ -379,9 +424,9 @@ _RULE_TEXT: Final = {
         "MCP",
     ),
     "KC3": (
-        "Bundled Kilo plugins load code into the agent runtime.",
-        "Remove bundled plugins or ship them separately so users review and install them "
-        "on purpose.",
+        "Bundled Kilo plugins or Agent Manager scripts run code automatically.",
+        "Remove bundled plugins and setup/run scripts, or ship them separately so users "
+        "review and install them on purpose.",
         "Plugins",
     ),
     "KC4": (
@@ -395,7 +440,8 @@ _RULE_TEXT: Final = {
 
 def _line_of_key(content: str, keys: tuple[str, ...]) -> int:
     for key in keys:
-        match = re.search(rf'"{re.escape(key)}"\s*:', content)
+        # JSON keys are quoted; YAML frontmatter keys start a line.
+        match = re.search(rf'"{re.escape(key)}"\s*:|^{re.escape(key)}:', content, re.MULTILINE)
         if match is not None:
             return content.count("\n", 0, match.start()) + 1
     return 1
@@ -432,7 +478,36 @@ def _finding(path: str, rule_id: str, declarations: list[_Declaration], start_li
     return analyzer_finding_to_finding(analyzer_finding)
 
 
+def _frontmatter_declarations(path: str, content: str) -> list[_Declaration]:
+    """Return KC1 declarations from an agent or mode file's YAML frontmatter."""
+    if not content.startswith("---"):
+        return []
+    end = re.search(r"^---[ \t]*$", content[3 : 3 + _MAX_FRONTMATTER_CHARS + 4], re.MULTILINE)
+    if end is None:
+        if len(content) > _MAX_FRONTMATTER_CHARS:
+            raise ValueError("frontmatter exceeds its size limit")
+        raise ValueError("unterminated frontmatter")
+    frontmatter = yaml.safe_load(content[3 : 3 + end.start()])
+    if not isinstance(frontmatter, dict) or "permission" not in frontmatter:
+        return []
+    name = path.rsplit("/", 1)[-1].removesuffix(".md")
+    declarations = _permission_declarations(frontmatter["permission"], f"agent:{name}")
+    if len(declarations) > _MAX_DECLARATIONS:
+        raise _DeclarationLimitError(len(declarations))
+    return declarations
+
+
 def _analyze_config(path: str, content: str) -> tuple[list[Finding], InspectionLedgerEvent]:
+    return _analyze_document(path, content, lambda: _config_declarations(_parse_document(content)))
+
+
+def _analyze_agent_file(path: str, content: str) -> tuple[list[Finding], InspectionLedgerEvent]:
+    return _analyze_document(path, content, lambda: _frontmatter_declarations(path, content))
+
+
+def _analyze_document(
+    path: str, content: str, extract: Callable[[], list[_Declaration]]
+) -> tuple[list[Finding], InspectionLedgerEvent]:
     if len(content) > MAX_FILE_CHARS:
         return [], ledger_event(
             outcome=LedgerOutcome.PARTIAL,
@@ -445,7 +520,7 @@ def _analyze_config(path: str, content: str) -> tuple[list[Finding], InspectionL
             observed_bytes=len(content.encode("utf-8", errors="replace")),
         )
     try:
-        declarations = _config_declarations(_parse_document(content))
+        declarations = extract()
     except _DeclarationLimitError as exc:
         return [], ledger_event(
             outcome=LedgerOutcome.PARTIAL,
@@ -456,7 +531,7 @@ def _analyze_config(path: str, content: str) -> tuple[list[Finding], InspectionL
             observed_records=int(exc.args[0]),
             limit_records=_MAX_DECLARATIONS,
         )
-    except (RecursionError, ValueError):
+    except (RecursionError, ValueError, yaml.YAMLError):
         return [], ledger_event(
             outcome=LedgerOutcome.PARTIAL,
             phase="static",
@@ -481,8 +556,10 @@ def _analyze_config(path: str, content: str) -> tuple[list[Finding], InspectionL
     )
 
 
-def _analyze_plugin_file(path: str) -> tuple[list[Finding], InspectionLedgerEvent]:
-    finding = _finding(path, "KC3", [_Declaration("KC3", Severity.HIGH, "bundled_plugin", path)], 1)
+def _analyze_code_file(
+    path: str, severity: Severity, kind: str
+) -> tuple[list[Finding], InspectionLedgerEvent]:
+    finding = _finding(path, "KC3", [_Declaration("KC3", severity, kind, path)], 1)
     return [finding], ledger_event(
         outcome=LedgerOutcome.COMPLETED,
         phase="static",
@@ -493,7 +570,7 @@ def _analyze_plugin_file(path: str) -> tuple[list[Finding], InspectionLedgerEven
 
 
 def node(state: SkillspectorState) -> AnalyzerNodeResponse:
-    """Inspect bundled Kilo configuration files and plugin modules."""
+    """Inspect bundled Kilo configuration, agent files, plugins, and scripts."""
     components = state.get("components") or []
     file_cache = state.get("local_file_cache") or state.get("file_cache") or {}
     decodable = {
@@ -503,17 +580,31 @@ def node(state: SkillspectorState) -> AnalyzerNodeResponse:
     findings: list[Finding] = []
     ledger_events: list[InspectionLedgerEvent] = []
 
-    config_paths = sorted(set(components).intersection(_CONFIG_PATHS))
-    plugin_paths = sorted(
-        {path for path in components if isinstance(path, str) and _PLUGIN_PATH.match(path)}
-    )
-
-    for path in plugin_paths:
-        path_findings, event = _analyze_plugin_file(path)
+    paths = sorted({path for path in components if isinstance(path, str)})
+    documents: list[tuple[str, Callable[[str, str], tuple[list[Finding], InspectionLedgerEvent]]]]
+    documents = []
+    for path in paths:
+        script = _AGENT_MANAGER_SCRIPT_PATH.match(path)
+        if _PLUGIN_PATH.match(path):
+            path_findings, event = _analyze_code_file(path, Severity.HIGH, "bundled_plugin")
+        elif script is not None:
+            # The setup script runs unprompted; the run script needs a click.
+            automatic = script.group("kind") == "setup"
+            path_findings, event = _analyze_code_file(
+                path,
+                Severity.HIGH if automatic else Severity.MEDIUM,
+                "setup_script" if automatic else "run_script",
+            )
+        else:
+            if path in _CONFIG_PATHS:
+                documents.append((path, _analyze_config))
+            elif _AGENT_FILE_PATH.match(path):
+                documents.append((path, _analyze_agent_file))
+            continue
         findings.extend(path_findings)
         ledger_events.append(event)
 
-    for path in config_paths:
+    for path, analyze in documents:
         if decodable.get(path) is False:
             ledger_events.append(
                 ledger_event(
@@ -538,7 +629,7 @@ def node(state: SkillspectorState) -> AnalyzerNodeResponse:
             )
             continue
         try:
-            path_findings, event = _analyze_config(path, content)
+            path_findings, event = analyze(path, content)
         except Exception as exc:
             logger.exception("%s failed for %s", ANALYZER_ID, path)
             ledger_events.append(

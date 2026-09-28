@@ -843,6 +843,17 @@ class TestRunStaticPatternsAgentSnoopingAdditional:
         findings = static_runner.run_static_patterns(state, [agent_snooping_module])
         assert any(f.rule_id == "AS3" for f in findings)
 
+    def test_kilo_config_setup_documentation_is_not_agent_snooping(self):
+        """Telling users where Kilo reads its config is not config access."""
+        doc = (
+            "Add the `mcp` block to your `kilo.json` config file.\n\n"
+            "- **Global:** `~/.config/kilo/kilo.json`\n"
+            "- **Project:** `./kilo.json` or `./.kilo/kilo.json` in your project root\n"
+        )
+        state = {"components": ["SKILL.md"], "file_cache": {"SKILL.md": doc}}
+        findings = static_runner.run_static_patterns(state, [agent_snooping_module])
+        assert not any(f.rule_id in ("AS1", "AS2", "AS3") for f in findings)
+
     def test_kilo_lookalike_directory_is_not_agent_snooping(self):
         """A dot-directory that merely starts with 'kilo' is not Kilo config."""
         state = {

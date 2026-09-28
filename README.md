@@ -541,14 +541,14 @@ SkillSpector detects **75 vulnerability patterns** across 18 categories:
 
 ### Bundled Kilo Configuration (4 patterns)
 
-Applies to `kilo.json(c)`, `.kilo/kilo.json(c)`, `.kilocode/kilo.json(c)`, the legacy `opencode.json(c)` project file (JSONC comments and trailing commas are accepted), and plugin modules under `.kilo/plugin(s)/` or `.kilocode/plugin(s)/`. These files take effect once the bundle becomes, or is copied into, a [Kilo](https://kilo.ai) project.
+Applies to the project configuration files Kilo loads (`kilo.json(c)` and `opencode.json(c)` at the root or inside `.kilo/` and `.kilocode/`, JSONC accepted), agent and mode files (`.kilo(code)/agent(s)/**/*.md`, `.kilo(code)/mode(s)/*.md`), plugin modules (`.kilo(code)/plugin(s)/*.{ts,js}`) and Agent Manager scripts (`.kilo/setup-script`, `.kilo/run-script`). These files take effect once the bundle becomes, or is copied into, a [Kilo](https://kilo.ai) project. Severities were checked against Kilo CLI 7.8.1: KC1 only reports grants that lift a prompt Kilo's built-in rules would show.
 
 | ID | Pattern | Severity | Description |
 |----|---------|----------|-------------|
-| KC1 | Permission Pre-Approval | MEDIUM–CRITICAL | `permission` set to `allow` globally (CRITICAL, blocking), for `bash`/`edit`/`external_directory` (HIGH), or through broad wildcard patterns, including inside `agent`/`mode` entries |
-| KC2 | Bundled MCP Servers | MEDIUM/HIGH | `local` servers start a command with the project (HIGH); `remote` servers receive tool traffic (MEDIUM) |
-| KC3 | Bundled Plugins | HIGH | `plugin` entries or bundled plugin modules loaded as code into Kilo |
-| KC4 | External Skill/Instruction Sources | MEDIUM/HIGH | `skills.urls` (HIGH), or `skills.paths`/`instructions` that point outside the bundle (MEDIUM) |
+| KC1 | Permission Pre-Approval | MEDIUM–CRITICAL | `permission` set to `allow` for everything (CRITICAL, blocking), for `bash`, `external_directory` or `.env` reads (HIGH), or through wildcard bash patterns and `doom_loop` (MEDIUM), including `agent`/`mode` entries and agent frontmatter |
+| KC2 | Bundled MCP Servers | MEDIUM/HIGH | `local` servers run their command when Kilo starts (HIGH); `remote` servers receive tool traffic (MEDIUM) |
+| KC3 | Bundled Code Execution | MEDIUM/HIGH | `plugin` entries, plugin modules and the Agent Manager setup script run without a prompt (HIGH); the run script runs from the Run button (MEDIUM) |
+| KC4 | External Skill/Instruction Sources | LOW–HIGH | `skills.urls` downloads remote skills (HIGH); `instructions` outside the bundle (MEDIUM); `skills.paths` outside the bundle, which Kilo ignores in project configs (LOW) |
 
 The agent snooping rules (AS1–AS3) also cover Kilo's `.kilo/`, `.kilocode/` and `~/.config/kilo/` directories, `mcp_settings.json`, and the shared `.agents/skills/` directory.
 

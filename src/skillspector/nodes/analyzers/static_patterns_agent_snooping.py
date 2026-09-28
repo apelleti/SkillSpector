@@ -78,8 +78,6 @@ AS1_CODE_PATTERNS = [
         rf"~?/{_AGENT_DIR}/(?:config|settings?|preferences?|credentials?)(?:\.(?:json|yaml|yml|toml))?",
         0.9,
     ),
-    # Kilo configuration files in the home, global, or project config directory
-    (r"~?/\.(?:config/kilo|kilo(?:code)?)/kilo\.jsonc?\b", 0.9),
 ]
 AS1_PROSE_PATTERNS = [
     (
