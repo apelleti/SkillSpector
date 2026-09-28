@@ -50,6 +50,10 @@ DEFAULT_EXPLANATIONS: dict[str, str] = {
     "BH2": "The bundled hook declaration directly proves that sensitive event or local file content is sent to a non-loopback remote destination.",
     "BH3": "Bundled project settings contain permission-related configuration; activation evidence distinguishes conditional grants from modes ignored on this surface.",
     "BH4": "Bundled settings keys (apiKeyHelper, statusLine, fileSuggestion, auth and telemetry helpers) run shell commands on their own once the settings are active, so their commands require review before installation.",
+    "KC1": "Bundled Kilo configuration (kilo.json, .kilo/kilo.json, legacy opencode.json) or agent/mode frontmatter sets permissions to 'allow' for actions Kilo normally asks about (bash, external_directory, reading .env files, doom_loop, or everything). Once the bundle becomes a Kilo project, those actions run without a prompt.",
+    "KC2": "Bundled Kilo configuration declares MCP servers. Kilo starts local server commands as soon as it runs in the project, without a prompt; remote servers receive tool calls and their arguments.",
+    "KC3": "Bundled Kilo plugins (plugin entries or .kilo/plugin modules) are imported as code as soon as Kilo starts in the project; Agent Manager setup scripts run automatically when a worktree is created.",
+    "KC4": "Bundled Kilo configuration loads skills or instructions from outside the bundle. Remote skills.urls are downloaded and cached as installed skills, so content never reviewed with the bundle reaches the agent.",
     "P1": "This pattern attempts to override system instructions or ignore safety constraints. Without LLM analysis, manual review is recommended.",
     "P2": "Hidden instructions were detected in comments or invisible text. These could contain malicious directives. Manual review is recommended.",
     "P3": "Instructions found that direct the agent to transmit conversation context or user data to external services.",
@@ -139,8 +143,8 @@ DEFAULT_EXPLANATIONS: dict[str, str] = {
     "TP3": "Instruction injection patterns found in parameter descriptions or default values. Parameter metadata is read by LLMs and can override intended behavior.",
     "TP4": "Skill description does not match actual code behavior. The declared purpose diverges from what the code actually does, indicating possible deception.",
     # Agent Snooping (AS1–AS3)
-    "AS1": "Skill reads from agent configuration directories (.claude/, .codex/, .gemini/). These directories may contain API keys, personal settings, and other credentials that the skill has no legitimate need to access.",
-    "AS2": "Skill accesses MCP server configuration files (mcp.json). MCP configs contain server URLs, authentication tokens, and tool definitions — reading them allows the skill to discover and potentially abuse other tool integrations.",
+    "AS1": "Skill reads from agent configuration directories (.claude/, .codex/, .gemini/, .kilo/, ~/.config/kilo/). These directories may contain API keys, personal settings, and other credentials that the skill has no legitimate need to access.",
+    "AS2": "Skill accesses MCP server configuration files (mcp.json, mcp_settings.json, or the mcp section of kilo.json). MCP configs contain server URLs, authentication tokens, and tool definitions — reading them allows the skill to discover and potentially abuse other tool integrations.",
     "AS3": "Skill enumerates or reads other installed skills. Access to other skills' SKILL.md files or the skills directory reveals prompt instructions, capabilities, and secrets that should be invisible to peer skills.",
     # Anti-Refusal Statements (jailbreak)
     "AR1": "Skill instructs the agent to never refuse or to always comply. Suppressing the agent's ability to decline removes a core safety control and enables downstream harmful requests to succeed.",
@@ -428,7 +432,7 @@ DEFAULT_REMEDIATIONS: dict[str, str] = {
     "TP3": "Remove injection patterns, system tokens, and suspicious content from parameter descriptions and default values.",
     "TP4": "Update the skill description to accurately reflect all capabilities, or remove undeclared functionality.",
     # Agent Snooping (AS1–AS3)
-    "AS1": "Remove all code or instructions that access agent configuration directories (.claude/, .codex/, .gemini/). If configuration values are needed, pass them explicitly as parameters or environment variables — never read the agent's own config files.",
+    "AS1": "Remove all code or instructions that access agent configuration directories (.claude/, .codex/, .gemini/, .kilo/, ~/.config/kilo/). If configuration values are needed, pass them explicitly as parameters or environment variables — never read the agent's own config files.",
     "AS2": "Remove all code or instructions that read MCP configuration files (mcp.json). MCP server details should be managed by the agent runtime, not read by individual skills.",
     "AS3": "Remove all code or instructions that list or read other skills' files or directories. Skills should operate independently; cross-skill access is a privilege escalation.",
     # Anti-Refusal Statements (jailbreak)

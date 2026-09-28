@@ -51,24 +51,37 @@ _CURRENT_SKILL_IDENTIFIERS: ContextVar[frozenset[str]] = ContextVar(
     "agent_snooping_current_skill_identifiers", default=frozenset()
 )
 
+# Agent runtimes whose per-user or per-project configuration directories hold
+# settings, credentials, MCP servers, and installed skills. Kilo reads both its
+# canonical ``.kilo/`` and legacy ``.kilocode/`` directories, plus a global
+# ``~/.config/kilo/`` directory.
+_AGENT_DIR = r"\.(?:claude|codex|gemini|continue|kilo(?:code)?)"
+_AGENT_SKILL_DIR = r"(?:\.(?:claude|codex|gemini|kilo(?:code)?|agents)|\.config/kilo)/skills?"
+
 # AS1: Agent Config Directory Access
 # Matches code/instructions that read from well-known agent config directories.
 AS1_CODE_PATTERNS = [
-    # Direct filesystem access to .claude/, .codex/, .gemini/ directories
-    (r"open\s*\(\s*['\"]?\.(?:claude|codex|gemini|continue)/", 0.9),
-    (r"(?:Path|pathlib\.Path)\s*\(\s*['\"]?\.(?:claude|codex|gemini|continue)/", 0.9),
-    (r"os\.path\.(?:join|exists|isfile)\s*\(\s*['\"]?\.(?:claude|codex|gemini|continue)", 0.85),
+    # Direct filesystem access to .claude/, .codex/, .gemini/, .kilo/ directories
+    (rf"open\s*\(\s*['\"]?{_AGENT_DIR}/", 0.9),
+    (rf"(?:Path|pathlib\.Path)\s*\(\s*['\"]?{_AGENT_DIR}/", 0.9),
+    (rf"os\.path\.(?:join|exists|isfile)\s*\(\s*['\"]?{_AGENT_DIR}", 0.85),
+    # Kilo CLI global configuration directory
+    (r"(?:open|(?:pathlib\.)?Path)\s*\(\s*['\"]?~?/?\.config/kilo/", 0.9),
     # Shell commands targeting config dirs
-    (r"(?:cat|less|head|tail|grep|find)\s+[^|&;\n]*~?/?\.(claude|codex|gemini)/", 0.85),
+    (
+        r"(?:cat|less|head|tail|grep|find)\s+[^|&;\n]*~?/?\.(?:claude|codex|gemini|kilo(?:code)?)/",
+        0.85,
+    ),
+    (r"(?:cat|less|head|tail|grep|find)\s+[^|&;\n]*~?/?\.config/kilo/", 0.85),
     # Home-directory config paths
     (
-        r"~?/\.(?:claude|codex|gemini|continue)/(?:config|settings?|preferences?|credentials?)(?:\.(?:json|yaml|yml|toml))?",
+        rf"~?/{_AGENT_DIR}/(?:config|settings?|preferences?|credentials?)(?:\.(?:json|yaml|yml|toml))?",
         0.9,
     ),
 ]
 AS1_PROSE_PATTERNS = [
     (
-        r"(?:read|load|open|access|fetch)\s+(?:the\s+)?(?:agent|claude|codex|gemini)\s+(?:config|configuration|settings?)\s+(?:from|at|in)\s+~?/?\.(?:claude|codex|gemini)",
+        r"(?:read|load|open|access|fetch)\s+(?:the\s+)?(?:agent|claude|codex|gemini|kilo)\s+(?:config|configuration|settings?)\s+(?:from|at|in)\s+~?/?\.(?:claude|codex|gemini|kilo(?:code)?|config/kilo)",
         0.9,
     ),
     # Generic "agent config" snooping instructions
@@ -82,13 +95,16 @@ AS1_PATTERNS = AS1_CODE_PATTERNS + AS1_PROSE_PATTERNS
 # AS2: MCP Config Access
 # Matches code/instructions specifically targeting MCP server configuration.
 AS2_CODE_PATTERNS = [
-    # Direct access to mcp.json files
-    (r"open\s*\(\s*['\"][^'\"]*mcp(?:_config)?\.json['\"]", 0.95),
-    (r"(?:Path|pathlib\.Path)\s*\(\s*['\"][^'\"]*mcp(?:_config)?\.json['\"]", 0.9),
-    (r"(?:cat|less|head|grep)\s+[^|&;\n]*mcp(?:_config)?\.json", 0.9),
-    (r"\.(?:claude|codex|gemini)/mcp(?:_config)?\.json", 0.95),
+    # Direct access to mcp.json files (mcp_settings.json is the Kilo Code /
+    # Cline-family global MCP store)
+    (r"open\s*\(\s*['\"][^'\"]*mcp(?:_config|_settings)?\.json['\"]", 0.95),
+    (r"(?:Path|pathlib\.Path)\s*\(\s*['\"][^'\"]*mcp(?:_config|_settings)?\.json['\"]", 0.9),
+    (r"(?:cat|less|head|grep)\s+[^|&;\n]*mcp(?:_config|_settings)?\.json", 0.9),
+    (r"\.(?:claude|codex|gemini|kilo(?:code)?)/mcp(?:_config|_settings)?\.json", 0.95),
     # Accessing MCP server URLs or API keys from config
-    (r"mcp(?:_config)?\.json.*?(?:api_?key|token|secret|url|endpoint)", 0.9),
+    (r"mcp(?:_config|_settings)?\.json.*?(?:api_?key|token|secret|url|endpoint)", 0.9),
+    # Reading the ``mcp`` section of a Kilo configuration file
+    (r"kilo\.jsonc?[^\n]{0,120}?\[\s*['\"]mcp['\"]\s*\]", 0.85),
 ]
 AS2_PROSE_PATTERNS = [
     # Instructions referencing MCP config
@@ -109,10 +125,10 @@ AS2_PATTERNS = AS2_CODE_PATTERNS + AS2_PROSE_PATTERNS
 AS3_CODE_PATTERNS = [
     # Listing skill directories
     (
-        r"(?:os\.listdir|os\.scandir|glob\.glob|Path\.iterdir)\s*\([^)]*\.(?:claude|codex|gemini)/skills?",
+        rf"(?:os\.listdir|os\.scandir|glob\.glob|Path\.iterdir)\s*\([^)]*{_AGENT_SKILL_DIR}",
         0.9,
     ),
-    (r"(?:ls|find|dir)\s+[^|&;\n]*\.(?:claude|codex|gemini)/skills?", 0.85),
+    (rf"(?:ls|find|dir)\s+[^|&;\n]*{_AGENT_SKILL_DIR}", 0.85),
     # Reading other skills' SKILL.md files
     (r"open\s*\(\s*['\"][^'\"]*SKILL\.md['\"].*?\bother\b", 0.85),
     # Accessing skills/CURRENT or adjacent skill directories
@@ -125,7 +141,7 @@ AS3_PROSE_PATTERNS = [
     ),
     # Instructions to discover other skills
     (
-        r"(?:list|discover|find|enumerate|identify)\s+(?:all\s+)?(?:other|installed|available)\s+(?:skills?|agents?|tools?)\s+(?:in\s+)?(?:the\s+)?(?:\.(?:claude|codex|gemini)|\$HOME)",
+        r"(?:list|discover|find|enumerate|identify)\s+(?:all\s+)?(?:other|installed|available)\s+(?:skills?|agents?|tools?)\s+(?:in\s+)?(?:the\s+)?(?:\.(?:claude|codex|gemini|kilo(?:code)?|agents)|\.config/kilo|\$HOME)",
         0.85,
     ),
     # Reading tool manifests of other agents

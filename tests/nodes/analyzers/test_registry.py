@@ -42,6 +42,7 @@ EXPECTED_ANALYZER_NODE_IDS: list[str] = [
     "behavioral_ast",
     "behavioral_taint_tracking",
     "bundled_execution_surface",
+    "bundled_kilo_config",
     "mcp_least_privilege",
     "mcp_tool_poisoning",
     "mcp_rug_pull",

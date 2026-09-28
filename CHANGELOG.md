@@ -1,5 +1,6 @@
 ### 2.12.0 (Unreleased)
 ### Features/Bug Fixes
+* feat(analyzer): detect bundled Kilo configuration surfaces (KC1–KC4) and extend agent snooping (AS1–AS3) to Kilo directories
 * fix(security): retain incomplete coverage for runtime-selected commands and remeasure active Git clones strictly (#514)
 * fix(scan): preserve required-input failures and multiline prompt uncertainty (#563)
 * fix(analyzer): preserve Perl print literal ownership and explain referenced-artifact limitations (#615)
